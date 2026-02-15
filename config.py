@@ -15,8 +15,10 @@ BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
 # ---------- Настройки в config (редактировать здесь) ----------
-OPENAI_MODEL: str = "gpt-5-mini-2025-08-07"
+OPENAI_MODEL: str = "gpt-4o-mini"
 OPENAI_TEMPERATURE: float = 0.2  # 0.0–2.0: выше — случайнее, ниже — предсказуемее
+OPENAI_MAX_TOKENS: int = 1024  # макс. токенов в ответе модели (None = по умолчанию API)
+OPENAI_SYSTEM_MESSAGE: str = ""  # необязательный system prompt (пусто = не отправляем)
 MAX_CONTEXT_MESSAGES: int = 20
 
 

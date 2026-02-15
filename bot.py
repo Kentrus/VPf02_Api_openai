@@ -1,6 +1,7 @@
 """
 Telegram-бот на aiogram с подключением к OpenAI и контекстом диалога.
 """
+import json
 import logging
 from typing import Any
 
@@ -10,7 +11,7 @@ from aiogram.types import Message
 
 from config import BOT_TOKEN, MAX_CONTEXT_MESSAGES, OPENAI_MODEL, OPENAI_TEMPERATURE, validate_config
 from context_manager import append_messages, clear_context, get_context
-from openai_client import chat_completion
+from openai_client import chat_completion, load_prompts, run_homework_prompt
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +39,80 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я бот с GPT. Пиши мне сообщения — я буду отвечать с учётом контекста.\n"
         'Чтобы сбросить историю, напиши: "очистить контекст"'
     )
+
+
+@dp.message(Command("homework"))
+async def cmd_homework(message: Message) -> None:
+    """Команда /homework: показывает задачу и список промптов."""
+    data = load_prompts()
+    task = data.get("homework_task", "")
+    lines = [f"*Задача:* {task}", "", "*Промпты:*"]
+    for p in data.get("prompts", []):
+        lines.append(f"  • {p.get('id')}: {p.get('name', '')}")
+    lines.append("")
+    lines.append("Отправь номер промпта (1 или 2)")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+def _format_prompt_for_display(prompt_entry: dict[str, Any]) -> str:
+    """Собирает текст промпта для отображения (role, context, question, format, example)."""
+    role = (prompt_entry.get("role") or "").strip()
+    context = (prompt_entry.get("context") or "").strip()
+    question = (prompt_entry.get("question") or "").strip()
+    fmt = (prompt_entry.get("format") or "").strip()
+    parts = []
+    if role:
+        parts.append(f"*Роль:*\n{role}")
+    if fmt:
+        parts.append(f"*Формат:*\n{fmt}")
+    parts.append(f"*Контекст:*\n{context}")
+    parts.append(f"*Задача:*\n{question}")
+    if prompt_entry.get("example") is not None:
+        ex = json.dumps(prompt_entry["example"], ensure_ascii=False, indent=2)
+        parts.append(f"*Пример:*\n```json\n{ex}\n```")
+    text = "\n\n".join(parts)
+    if len(text) > 4000:
+        text = text[:3997] + "..."
+    return text
+
+
+@dp.message(F.text.regexp(r"^[12]$"))
+async def handle_homework_prompt_choice(message: Message) -> None:
+    """Обработка выбора номера промпта (1 или 2) для ДЗ."""
+    prompt_id = int(message.text.strip())
+    data = load_prompts()
+    prompt_entry = next((p for p in data.get("prompts", []) if p.get("id") == prompt_id), None)
+    if not prompt_entry:
+        await message.answer(f"Промпт с id={prompt_id} не найден.")
+        return
+
+    await message.answer(f"Запускаю промпт #{prompt_id}, подожди...")
+    prompt_text = _format_prompt_for_display(prompt_entry)
+    await message.answer(f"*Промпт:*\n\n{prompt_text}", parse_mode="Markdown")
+
+    try:
+        out = run_homework_prompt(prompt_id)
+    except Exception as e:
+        logger.exception("Ошибка при запуске промпта: %s", e)
+        await message.answer(f"Ошибка: {e}")
+        return
+
+    name = prompt_entry.get("name", "")
+    usage = out.get("usage", {})
+    parsed = out.get("parsed", False)
+    result = out.get("result", {})
+
+    json_str = json.dumps(result, ensure_ascii=False, indent=2)
+    body = (
+        f"*Промпт:* {name}\n"
+        f"*Валидный JSON:* {'да' if parsed else 'нет'}\n"
+        f"*Токены:* вход {usage.get('prompt_tokens', 0)}, выход {usage.get('completion_tokens', 0)}, всего {usage.get('total_tokens', 0)}\n\n"
+        f"```json\n{json_str}\n```"
+    )
+    if len(body) > 4000:
+        body = body[:3980] + "\n...\n```"
+    await message.answer(body, parse_mode="Markdown")
+    await message.answer("Результат сохранён в logs/homework_results.json")
 
 
 @dp.message(F.text)
@@ -75,6 +150,13 @@ async def handle_text(message: Message) -> None:
         usage["completion_tokens"],
         usage["total_tokens"],
     )
+
+    if not response_text.strip():
+        logger.warning("Пустой ответ от модели для user_id=%s", user_id)
+        await message.answer(
+            "Модель вернула пустой ответ. Попробуйте переформулировать или напишите «очистить контекст»."
+        )
+        return
 
     # Обновляем контекст: добавляем сообщение пользователя и ответ ассистента
     append_messages(
